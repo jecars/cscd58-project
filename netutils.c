@@ -32,7 +32,7 @@ int create_connection(struct sockaddr_in *sin)
  create_accept_connectionconnection
 
  Accepts a connection on specified socket file descriptor (sfd).
- Sets sin to the address of the connecting peer. 
+ Sets sin to the address of the connecting peer.
  Returns new socket file descriptor for the client connection.
  Terminates program if could not accept.
 
@@ -41,9 +41,10 @@ int create_connection(struct sockaddr_in *sin)
 int accept_connection(int sfd, struct sockaddr_in *sin)
 {
     int cfd;
+    socklen_t len = sizeof(*sin);
 
     // accept from sin on socket sfd
-    if ((cfd = accept(sfd, (struct sockaddr *)sin, (socklen_t*)sin)) < 0) {
+    if ((cfd = accept(sfd, (struct sockaddr *)sin, &len)) < 0) {
         perror("ERROR: accept_connection could not accept client");
         exit(EXIT_FAILURE);
     }
@@ -89,7 +90,14 @@ int send_D58P_request(struct sockaddr_in *sin, struct D58P *req, struct D58P *re
     // response from server
     char res_buf[MAX_REQUEST];
     bzero(res_buf, MAX_REQUEST);
-    int res_len = recv(sfd, res_buf, MAX_REQUEST, 0);
+    int res_len = recv(sfd, res_buf, MAX_REQUEST - 1, 0);
+
+    if (res_len <= 0) {
+        close(sfd);
+        return res_len;
+    }
+
+    res_buf[res_len] = '\0';
 
     // acknowledge to server that we received a response
     send_D58P_response_ack(sfd);
@@ -137,7 +145,7 @@ void send_D58P_response(int sfd, struct D58P *res)
 void send_D58P_response_ack(int sfd)
 {
     // send request
-    send(sfd, D58P_ACK_STRING, sizeof(D58P_ACK_STRING), 0);
+    send(sfd, D58P_ACK_STRING, strlen(D58P_ACK_STRING), 0);
 }
 
 /*
@@ -152,8 +160,14 @@ int verify_acknowledgement(int sfd)
     bzero(ack_buf, MAX_REQUEST);
 
     // recieve data  through socket
-    recv(sfd, ack_buf, sizeof(ack_buf), 0); 
-    
+    int len = recv(sfd, ack_buf, sizeof(ack_buf) - 1, 0);
+
+    if (len <= 0) {
+        return 0;
+    }
+
+    ack_buf[len] = '\0';
+
     // parse data as D58P request
     struct D58P ack;
     parse_D58P_buf(&ack, ack_buf);
@@ -312,13 +326,16 @@ void parse_D58P_buf(struct D58P *data, char buf[MAX_REQUEST])
 
     // make a copy of buf so strtok isn't modified
     char buf_cpy[MAX_REQUEST];
-    strncpy(buf_cpy, buf, MAX_REQUEST);
+    bzero(buf_cpy, MAX_REQUEST);
+    strncpy(buf_cpy, buf, MAX_REQUEST - 1);
+    buf_cpy[MAX_REQUEST - 1] = '\0';
 
     char *token = strtok(buf_cpy, delim);
 
     int i = 0;
     while(token != NULL && i < MAX_LINES) {
-        strncpy(data->lines[i], token, MAX_LINE);
+        strncpy(data->lines[i], token, MAX_LINE - 1);
+        data->lines[i][MAX_LINE - 1] = '\0';
         i++;
         token = strtok(NULL, delim);
     }

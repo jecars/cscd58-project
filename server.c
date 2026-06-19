@@ -11,21 +11,21 @@ pthread_mutex_t thread_list_mutex;      // synchronization construct
 pthread_mutex_t message_mutex;      // synchronization construct
 
 /*
- Helper to add current thread to list of current threads handling 
+ Helper to add current thread to list of current threads handling
  /Get Message requests.
 */
 struct server_thread* add_thread(int client_socket, struct user *user)
 {
     struct server_thread *t = (struct server_thread*) malloc(sizeof(struct server_thread));
-    
+
     t->client_socket = client_socket;
     t->started = time(NULL);
     t->tid = pthread_self();
     t->user = user;
     t->connection_switched = 0;
 
-    t->next = thread_list;
     pthread_mutex_lock(&thread_list_mutex);
+    t->next = thread_list;
     thread_list = t;
     pthread_mutex_unlock(&thread_list_mutex);
 
@@ -155,7 +155,7 @@ void register_user(char *username, char *password, char *e, char *n)
     strncpy(new_user->password, password, MAX_LINE);
     strncpy(new_user->e, e, MAX_LINE);
     strncpy(new_user->n, n, MAX_LINE);
-    
+
     new_user->next = user_list;
     user_list = new_user;
 }
@@ -230,7 +230,7 @@ void user_handler(int client_socket, struct D58P *req, int len)
         send_D58P_response(client_socket, &res);
         return;
     }
-    
+
     // perform action
     if(is_authenticated(username, password)) { // logged in
         create_response(&res, D58P_USER_STRING_RES, D58P_OK);
@@ -335,19 +335,19 @@ void get_message_handler(int client_socket, struct D58P *req, int len)
     }
 
     struct user *user = find_user(username);
-    
+
     // determine if thread already exists for this user
     struct server_thread *t = find_thread(user);
     if(t != NULL) {
         t->connection_switched = 1;
     }
-    
+
     // add this thread to list
     t = add_thread(client_socket, user);
 
     // find oldest message that should be sent
     struct message *cur_message, *prev_message, *oldest_message;
-    
+
     prev_message = NULL;
     cur_message = message_list;
     oldest_message = NULL;
@@ -360,9 +360,9 @@ void get_message_handler(int client_socket, struct D58P *req, int len)
             close(client_socket);
             pthread_exit(0);
         }
-        
+
         pthread_mutex_lock(&message_mutex);
-        
+
         while(cur_message != NULL) {
             if(cur_message->to == user) {
                 oldest_message = cur_message;
@@ -374,14 +374,16 @@ void get_message_handler(int client_socket, struct D58P *req, int len)
             prev_message = cur_message;
             cur_message = cur_message->next;
         }
-        
+
         // found message
         if(oldest_message != NULL) break;
-        
+
         // reset values to search again
         cur_message = message_list;
         prev_message = NULL;
         pthread_mutex_unlock(&message_mutex);
+
+        usleep(10000);
     }
 
     // remove message from message list
@@ -441,6 +443,12 @@ void get_key_handler(int client_socket, struct D58P *req, int len)
 
     struct user *target_user_st = find_user(target_user);
 
+    if(target_user_st == NULL) {
+        create_response(&res, D58P_GET_KEY_RES, D58P_NOT_FOUND);
+        send_D58P_response(client_socket, &res);
+        return;
+    }
+
     char *e = target_user_st->e;
     char *n = target_user_st->n;
 
@@ -458,13 +466,21 @@ void get_key_handler(int client_socket, struct D58P *req, int len)
 void *handle_connection(void *arg)
 {
     int client_socket = *((int*) arg);
+    free(arg);
 
     char buf[MAX_REQUEST];
     bzero(buf, MAX_REQUEST);
 
     // recieve data  through socket
-    int len = recv(client_socket, buf, sizeof(buf), 0); 
-    
+    int len = recv(client_socket, buf, sizeof(buf) - 1, 0);
+
+    if(len <= 0) {
+        close(client_socket);
+        return NULL;
+    }
+
+    buf[len] = '\0';
+
     // parse data as D58P request
     struct D58P req;
     parse_D58P_buf(&req, buf);
@@ -482,10 +498,11 @@ void *handle_connection(void *arg)
     } else {
         printf("Invalid request\n");
         char reply_buf[MAX_REQUEST] = "Invalid request\n";
-        send(client_socket, reply_buf, MAX_REQUEST, 0); // send back to client
+        send(client_socket, reply_buf, strlen(reply_buf), 0); // send back to client
     }
 
     close(client_socket);
+    return NULL;
 }
 
 /*
@@ -495,13 +512,22 @@ void *handle_connection(void *arg)
 */
 void server_loop()
 {
-    int client_socket; pthread_t tid;
+    int *client_socket; pthread_t tid;
+    struct sockaddr_in client_addr;
 
-    client_socket = accept_connection(sfd, &s_addr);
+    client_socket = malloc(sizeof(int));
 
-    printf("~ New connection: %s\n", inet_ntoa(s_addr.sin_addr));
+    if(client_socket == NULL) {
+        perror("server: malloc");
+        exit(EXIT_FAILURE);
+    }
 
-    pthread_create(&tid, NULL, &handle_connection, &client_socket);
+    *client_socket = accept_connection(sfd, &client_addr);
+
+    printf("~ New connection: %s\n", inet_ntoa(client_addr.sin_addr));
+
+    pthread_create(&tid, NULL, &handle_connection, client_socket);
+    pthread_detach(tid);
 }
 
 int main()
@@ -511,7 +537,7 @@ int main()
     s_addr.sin_family = AF_INET;
     s_addr.sin_addr.s_addr = INADDR_ANY;
     s_addr.sin_port = htons(SERVER_PORT);
-    
+
     // create socket
     if ((sfd = socket(PF_INET, SOCK_STREAM, 0)) < 0) {
         perror("server: socket");
@@ -538,4 +564,5 @@ int main()
     while (1) server_loop();
 
     close(sfd); // should never get here though
+    return 0;
 }

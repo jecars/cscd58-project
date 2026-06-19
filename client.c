@@ -18,29 +18,52 @@ void* get_messages(void *aux)
 {
     while(1) {
         if(authenticated) {
-            // build get message request
             struct D58P req, res;
             create_get_messages_request(&req, &auth);
 
             int res_len = send_D58P_request(&server_addr, &req, &res);
+
+            if (res_len <= 0 || is_empty(res.lines[1])) {
+                usleep(10000);
+                continue;
+            }
+
             int code = atoi(res.lines[1]);
-            char *from = res.lines[2];
-            char *message = res.lines[3];
-            
-            //convert from hex
-            long buflen = (long) strlen(message); 
-            unsigned char *bin = OPENSSL_hexstr2buf(message, &buflen);
 
-            unsigned char plaintext[MAX_LINE];
-            int plain_len = decrypt_message(keys, bin, plaintext, 256);
-            plaintext[plain_len] = '\0';
-
-            // print the message
             if(code == D58P_OK) {
+                char *from = res.lines[2];
+                char *message = res.lines[3];
+
+                if (is_empty(message)) {
+                    continue;
+                }
+
+                long buflen = 0;
+                unsigned char *bin = OPENSSL_hexstr2buf(message, &buflen);
+
+                if (bin == NULL || buflen <= 0) {
+                    OPENSSL_free(bin);
+                    continue;
+                }
+
+                unsigned char plaintext[MAX_LINE];
+                int plain_len = decrypt_message(keys, (char *)bin, plaintext, (int)buflen);
+
+                OPENSSL_free(bin);
+
+                if (plain_len < 0 || plain_len >= MAX_LINE) {
+                    continue;
+                }
+
+                plaintext[plain_len] = '\0';
+
+                // print the message
                 printf("%s: %s\n", from, plaintext);
             }
         }
     }
+
+    return NULL;
 }
 
 
@@ -82,7 +105,7 @@ void user_handler(char buf[MAX_LINE], int len)
         fprintf(stderr, "client: could not get encryption keys\n");
         exit(EXIT_FAILURE);
     }
-    
+
     if (get_public(keys, auth.e, auth.n)) {     // get the key and set it
         fprintf(stderr, "client: could not retrieve the public key\n");
         exit(EXIT_FAILURE);
@@ -93,11 +116,17 @@ void user_handler(char buf[MAX_LINE], int len)
     auth.username[auth.user_len-1] = '\0';  // add a \0 to username
     auth.password[auth.password_len-1] = '\0'; // replace \n with \0
 
-    // build request   
+    // build request
     struct D58P req, res;
     create_user_request(&req, &auth);
 
     int res_len = send_D58P_request(&server_addr, &req, &res);
+
+    if (res_len <= 0 || is_empty(res.lines[1])) {
+        printf("Authenticated failed\n");
+        bzero(&auth, sizeof(struct D58P_auth));
+        return;
+    }
 
     int code = atoi(res.lines[1]);
     authenticated = code == D58P_OK || code == D58P_CREATED;
@@ -108,6 +137,7 @@ void user_handler(char buf[MAX_LINE], int len)
         // cancel old thread if exists
         if(get_msg_tid) {
             pthread_cancel(get_msg_tid);
+            get_msg_tid = 0;
         }
 
         // create get messages thread
@@ -123,7 +153,7 @@ void user_handler(char buf[MAX_LINE], int len)
     D58P /Get Key
     <user>
     <target_user>
-    
+
     Then saves the key and the name of the target_user to keep track of the current recipient key*/
 int key_handler() {
     if(authenticated) {
@@ -132,21 +162,44 @@ int key_handler() {
         create_get_key_request(&req, &auth, target_user);
 
         int res_len = send_D58P_request(&server_addr, &req, &res);
+
+        if (res_len <= 0 || is_empty(res.lines[1])) {
+            return 1;
+        }
+
         int code = atoi(res.lines[1]);
-        
+
         if(code == D58P_OK) {
             char *key_for = res.lines[3];
             char *e = res.lines[4];
             char *n = res.lines[5];
+
+            if (is_empty(key_for) || is_empty(e) || is_empty(n)) {
+                return 1;
+            }
+
             RSA_free(target_key);
             target_key = RSA_new();
-            if (set_public(target_key, e, n)) {  return 1; }
-            strncpy(target_key_name, key_for, MAX_LINE);
+
+            if (target_key == NULL) {
+                return 1;
+            }
+
+            if (set_public(target_key, e, n)) {
+                RSA_free(target_key);
+                target_key = NULL;
+                return 1;
+            }
+
+            strncpy(target_key_name, key_for, MAX_LINE - 1);
+            target_key_name[MAX_LINE - 1] = '\0';
             return 0;
         } else {
             return 1;
         }
     }
+
+    return 1;
 }
 
 /*
@@ -155,7 +208,7 @@ int key_handler() {
 
     Messages of form:
     /msg <recipient>
-    
+
     All further messages should be directed to specified user*/
 void msg_handler(char buf[MAX_LINE], int len)
 {
@@ -175,20 +228,25 @@ void msg_handler(char buf[MAX_LINE], int len)
             return;
         }
 
-        int target_user_len = strnlen(user, MAX_LINE) - 1; // dont copy the \n at the end
+        int target_user_len = strnlen(user, MAX_LINE);
+
+        if(target_user_len > 0 && user[target_user_len - 1] == '\n') {
+            target_user_len -= 1;
+        }
+
         strncpy(target_user, user, target_user_len);
         target_user[target_user_len] = '\0'; // in case the new target's name is shorter than previous
 
-        if(target_key_name == NULL || strncmp(target_key_name, target_user, MAX_LINE)) {
-            if (key_handler()) { 
-                printf("Could not retrieve the key of user '%s'\n", user);
+        if(strlen(target_key_name) == 0 || strncmp(target_key_name, target_user, MAX_LINE) != 0) {
+            if (key_handler()) {
+                printf("Could not retrieve the key of user '%s'\n", target_user);
                 return;
             }
         }
 
-        
-        
-        printf("Now chatting with %s", user);
+
+
+        printf("Now chatting with %s\n", target_user);
     }
 }
 
@@ -202,16 +260,17 @@ void send_message_handler(char buf[MAX_LINE], int len)
 {
     // build message data
     struct D58P_message_data data;
+    bzero(&data, sizeof(struct D58P_message_data));
 
     // not authenticated
-    if(authenticated && auth.user_len == 0 || auth.password_len == 0) {
+    if((authenticated && auth.user_len == 0) || auth.password_len == 0) {
         printf("Authenticate using /user <user> <password>\n");
         return;
     }
 
     // set target user for message
     data.target_user_len = strnlen(target_user, MAX_LINE);
-    if (data.target_user_len == 0) {
+    if (data.target_user_len == 0 || target_key == NULL) {
         printf("Initiate chat using /msg <recipient>\n");
         return;
     }
@@ -226,18 +285,32 @@ void send_message_handler(char buf[MAX_LINE], int len)
     unsigned char ciphertext[MAX_LINE];
     int cipher_len;
     encrypt_message(target_key, buf, ciphertext, len, &cipher_len);
-    
+
     // convert to hex
     char *hex = OPENSSL_buf2hexstr(ciphertext, (long)cipher_len);
+
+    if (hex == NULL) {
+        printf("Could not send message to %s\n", target_user);
+        return;
+    }
+
     int hex_len = strlen(hex);
     memcpy(data.message, hex, hex_len);
+    data.message[hex_len] = '\0';
     data.message_len = hex_len;
+
+    OPENSSL_free(hex);
 
     // build message request from message data
     struct D58P req, res;
     create_message_request(&req, &auth, &data);
 
     int res_len = send_D58P_request(&server_addr, &req, &res);
+
+    if (res_len <= 0 || is_empty(res.lines[1])) {
+        printf("Could not send message to %s\n", target_user);
+        return;
+    }
 
     int code = atoi(res.lines[1]);
 
@@ -248,7 +321,7 @@ void send_message_handler(char buf[MAX_LINE], int len)
 
 /*
  exit_handler
- Exits the client when user inputs /exit 
+ Exits the client when user inputs /exit
 */
 void exit_handler(char buf[MAX_LINE], int len)
 {
@@ -283,7 +356,7 @@ void client_loop()
 {
     char buf[MAX_LINE];
     int len, exit_flag = 0;
-    
+
     fgets(buf, sizeof(buf), stdin);
 
     buf[MAX_LINE-1] = '\0';
@@ -320,7 +393,7 @@ int main(int argc, char * argv[])
         fprintf(stderr, "client: unknown host: %s\n", host);
         exit(EXIT_FAILURE);
     }
-    
+
     // setup server struct
     bzero((char *)&server_addr, sizeof(server_addr)); // erase bytes in sin
     server_addr.sin_family = AF_INET; // internet family
@@ -330,6 +403,11 @@ int main(int argc, char * argv[])
     // zero global variables initially
     bzero((char *) &auth, sizeof(auth));
     bzero(target_user, sizeof(target_user));
+    bzero(target_key_name, sizeof(target_key_name));
+    authenticated = 0;
+    get_msg_tid = 0;
+    keys = NULL;
+    target_key = NULL;
 
     printf("Chat client started...\n");
     printf("Please authenticate using /user <user> <password>\n");

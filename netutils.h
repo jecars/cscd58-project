@@ -10,8 +10,8 @@
 #define assert(x, msg) if (!(x)) { fprintf(stderr, "%s", msg); exit(EXIT_FAILURE); }
 
 #define MAX_REQUEST 4096    // maximum # of bytes for request
-#define MAX_LINES 50        // maximum # of lines for request
-#define MAX_LINE 4096        // maximum # of bytes per line
+#define MAX_LINES 8         // maximum # of lines for request
+#define MAX_LINE 1024       // maximum # of bytes per line
 
 /*
  D58P: D58 Protocol definitions
@@ -39,7 +39,7 @@ enum D58P_ResponseCode {
 struct D58P_auth {
     char username[MAX_LINE];         // type of request
     int user_len;                       // length of message
-    
+
     char password[MAX_LINE];         // type of request
     int password_len;                   // length of message
 
@@ -50,7 +50,7 @@ struct D58P_auth {
 struct D58P_message_data {
     char target_user[MAX_LINE];
     int target_user_len;
-    
+
     char message[MAX_LINE];          // type of request
     int message_len;                    // length of message
 };
